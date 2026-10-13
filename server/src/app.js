@@ -1,0 +1,184 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import mongoSanitize from 'express-mongo-sanitize';
+import xss from 'xss-clean';
+import cookieParser from 'cookie-parser';
+import { UPLOAD_ROOT } from './config/paths.js';
+
+// Routes
+import authRoutes from './routes/auth.routes.js';
+import profileRoutes from './routes/profile.routes.js';
+import companyRoutes from './routes/company.routes.js';
+import jobRoutes from './routes/job.routes.js';
+import applicationRoutes from './routes/application.routes.js';
+import notificationRoutes from './routes/notification.routes.js';
+import recommendationRoutes from './routes/recommendation.routes.js';
+import adminRoutes from './routes/admin.routes.js';
+
+const app = express();
+
+// Render/Railway/Heroku run behind a proxy: needed for rate-limit + secure cookies
+app.set('trust proxy', 1);
+
+/* =====================================================
+   SECURITY MIDDLEWARE
+===================================================== */
+
+app.use(
+  helmet({
+    crossOriginResourcePolicy: {
+      policy: 'cross-origin',
+    },
+  })
+);
+
+/* =====================================================
+   CORS
+===================================================== */
+
+const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)),
+    credentials: true,
+  })
+);
+
+/* =====================================================
+   BODY PARSING
+===================================================== */
+
+app.use(express.json());
+app.use(
+  express.urlencoded({
+    extended: true,
+  })
+);
+
+app.use(cookieParser());
+
+/* =====================================================
+   DATA SANITIZATION
+===================================================== */
+
+// Protect against NoSQL injection
+app.use(mongoSanitize());
+
+// Protect against XSS attacks
+app.use(xss());
+
+/* =====================================================
+   STATIC FILES
+===================================================== */
+
+// Resume / uploaded files
+app.use('/uploads', express.static(UPLOAD_ROOT));
+
+/* =====================================================
+   ROOT / HEALTH CHECK
+===================================================== */
+
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Job Portal Backend API is running',
+    status: 'OK',
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    status: 'OK',
+    message: 'Server is healthy',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/* =====================================================
+   API ROUTES
+===================================================== */
+
+// Authentication
+app.use('/api/v1/auth', authRoutes);
+
+// User profiles
+app.use('/api/v1/profile', profileRoutes);
+
+// Companies
+app.use('/api/v1/companies', companyRoutes);
+
+// Jobs
+app.use('/api/v1/jobs', jobRoutes);
+
+// Applications
+app.use('/api/v1/applications', applicationRoutes);
+
+// Notifications
+app.use('/api/v1/notifications', notificationRoutes);
+
+// Job recommendations
+app.use('/api/v1/recommendations', recommendationRoutes);
+
+// Admin
+app.use('/api/v1/admin', adminRoutes);
+
+/* =====================================================
+   404 HANDLER
+===================================================== */
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'API Endpoint Not Found',
+    path: req.originalUrl,
+  });
+});
+
+/* =====================================================
+   CENTRALIZED ERROR HANDLER
+===================================================== */
+
+app.use((err, req, res, next) => {
+  let statusCode = err.status || err.statusCode || 500;
+  let message = err.message || 'Internal Server Error';
+  let errors;
+
+  if (err.name === 'ValidationError' && err.errors) {
+    statusCode = 400;
+    errors = Object.values(err.errors).map((e) => ({ field: e.path, message: e.message }));
+    message = 'Validation Error';
+  } else if (err.name === 'CastError') {
+    statusCode = 400;
+    message = `Invalid ${err.path}`;
+  } else if (err.code === 11000) {
+    statusCode = 409;
+    message = 'Duplicate value: this record already exists';
+  } else if (err.name === 'MulterError') {
+    statusCode = 400;
+    message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large (maximum 5MB)' : err.message;
+  } else if (err.type === 'entity.parse.failed') {
+    statusCode = 400;
+    message = 'Invalid JSON body';
+  }
+
+  if (statusCode >= 500) console.error('ERROR:', err);
+
+  res.status(statusCode).json({
+    success: false,
+    message: statusCode >= 500 && process.env.NODE_ENV === 'production' ? 'Internal Server Error' : message,
+    ...(errors && { errors }),
+    ...(process.env.NODE_ENV === 'development' && statusCode >= 500 && { stack: err.stack }),
+  });
+});
+
+/* =====================================================
+   EXPORT APP
+===================================================== */
+
+export default app;
