@@ -1,3 +1,4 @@
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -18,8 +19,42 @@ import adminRoutes from './routes/admin.routes.js';
 
 const app = express();
 
-// Render/Railway/Heroku run behind a proxy: needed for rate-limit + secure cookies
+/* =====================================================
+   PROXY CONFIGURATION
+===================================================== */
+
+// Render/Railway/Heroku run behind a proxy.
+// Required for correct client IP detection and secure cookies.
 app.set('trust proxy', 1);
+
+/* =====================================================
+   CORS CONFIGURATION
+===================================================== */
+
+const allowedOrigins = [
+  'https://jobportalmernapp.netlify.app',
+  'http://localhost:5173',
+];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests without an Origin header
+    // such as server-to-server requests and health checks.
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.error(`CORS blocked origin: ${origin}`);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
+};
+
+// Register CORS once, before routes and other middleware.
+app.use(cors(corsOptions));
 
 /* =====================================================
    SECURITY MIDDLEWARE
@@ -33,54 +68,29 @@ app.use(
   })
 );
 
-
 /* =====================================================
-   CORS
+   BODY PARSING & COOKIES
 ===================================================== */
 
-const allowedOrigins = [
-  'http://localhost:5173',
-  'https://jobportalmernapp.netlify.app',
-  ...(process.env.CLIENT_URL || '')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean),
-];
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests without an Origin header (Postman/server-to-server)
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      console.error(`CORS blocked origin: ${origin}`);
-      return callback(new Error('Not allowed by CORS'));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    optionsSuccessStatus: 204,
-  })
-);
-
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 /* =====================================================
    DATA SANITIZATION
 ===================================================== */
 
-// Protect against NoSQL injection
+// Protect against NoSQL injection.
 app.use(mongoSanitize());
 
-// Protect against XSS attacks
+// Protect against XSS attacks.
 app.use(xss());
 
 /* =====================================================
    STATIC FILES
 ===================================================== */
 
-// Resume / uploaded files
+// Resume / uploaded files.
 app.use('/uploads', express.static(UPLOAD_ROOT));
 
 /* =====================================================
@@ -155,7 +165,10 @@ app.use((err, req, res, next) => {
 
   if (err.name === 'ValidationError' && err.errors) {
     statusCode = 400;
-    errors = Object.values(err.errors).map((e) => ({ field: e.path, message: e.message }));
+    errors = Object.values(err.errors).map((e) => ({
+      field: e.path,
+      message: e.message,
+    }));
     message = 'Validation Error';
   } else if (err.name === 'CastError') {
     statusCode = 400;
@@ -165,19 +178,35 @@ app.use((err, req, res, next) => {
     message = 'Duplicate value: this record already exists';
   } else if (err.name === 'MulterError') {
     statusCode = 400;
-    message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large (maximum 5MB)' : err.message;
+    message =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? 'File is too large (maximum 5MB)'
+        : err.message;
   } else if (err.type === 'entity.parse.failed') {
     statusCode = 400;
     message = 'Invalid JSON body';
+  } else if (err.message === 'Not allowed by CORS') {
+    statusCode = 403;
+    message = 'Origin not allowed by CORS policy';
   }
 
-  if (statusCode >= 500) console.error('ERROR:', err);
+  if (statusCode >= 500) {
+    console.error('ERROR:', err);
+  }
+
+  if (res.headersSent) {
+    return next(err);
+  }
 
   res.status(statusCode).json({
     success: false,
-    message: statusCode >= 500 && process.env.NODE_ENV === 'production' ? 'Internal Server Error' : message,
+    message:
+      statusCode >= 500 && process.env.NODE_ENV === 'production'
+        ? 'Internal Server Error'
+        : message,
     ...(errors && { errors }),
-    ...(process.env.NODE_ENV === 'development' && statusCode >= 500 && { stack: err.stack }),
+    ...(process.env.NODE_ENV === 'development' &&
+      statusCode >= 500 && { stack: err.stack }),
   });
 });
 
